@@ -41,7 +41,9 @@ import {
 import { PROPOSAL } from '../web/components/build/v2/copy';
 import { PART_VOCAB } from '../web/lib/build/labels';
 import { ProposalScreen } from '../web/components/build/v2/ProposalScreen';
-import { ProposalCategoryCard } from '../web/components/build/v2/ProposalCategoryCard';
+import {
+  ProposalCategoryCard, PartOptionList,
+} from '../web/components/build/v2/ProposalCategoryCard';
 import { readinessOf } from '../web/components/build/v2/readiness';
 import {
   ECOSYSTEM_SELECTION_CATEGORY, NO_SELECTIONS, selectionsSurviving,
@@ -1826,6 +1828,342 @@ ok('AE-4: the proposal opens on `readiness.state === ready` alone',
   && (PREVIEW_SRC.match(/setScreen\('proposal'\)/g) ?? []).length === 1);
 ok('AE-4: …and the screen does not re-implement readiness for itself',
   !/provenPath/.test(SCREEN_SRC) && !/provenPath/.test(CARD_SRC));
+
+
+
+// ═══════════════════════════════════════════════════════════════════════════
+section('AF — OVERRULING A SYSTEM RECOMMENDATION');
+// ═══════════════════════════════════════════════════════════════════════════
+/*
+ * Phase 2E gave the reader the open decisions. Phase 2F gives them the settled
+ * ones — a `recommended` category can be swapped for another candidate the
+ * engine already admitted, through the SAME `selectedParts` contract.
+ *
+ * Nothing new enters the domain. The whole feature is: show the ids the engine
+ * already returned, minus the one it picked, and send a press down the Phase 2E
+ * path. So what is proved here is that the UI reaches semantics Phase 2D built
+ * and that the engine's answer — not the UI's memory — is what comes back.
+ */
+const recDecision = dec(baseline, RANKED);
+const ALTERNATIVES = recDecision.candidateIds.filter(id => id !== recDecision.partId);
+
+ok(`AF-0: «${RANKED}» is system-settled with real alternatives (${ALTERNATIVES.length})`,
+  recDecision.status === 'recommended'
+  && recDecision.selectionSource === 'system'
+  && recDecision.partId !== undefined
+  && ALTERNATIVES.length > 0);
+/* E — the current recommendation is not offered as an alternative to itself. */
+ok('AF-E: the alternatives exclude the part already recommended',
+  !ALTERNATIVES.includes(recDecision.partId!)
+  && ALTERNATIVES.length === recDecision.candidateIds.length - 1);
+/* F + G — the list is the engine's, and nothing from the wider shelf leaks in. */
+const shelf = (PART_CATEGORY_MAP[RANKED] ?? []).map(p => p.id);
+ok('AF-F: every alternative is one the engine returned on this decision',
+  ALTERNATIVES.every(id => recDecision.candidateIds.includes(id)));
+ok(`AF-G: …and the shelf is strictly bigger (${shelf.length} stocked, `
+  + `${recDecision.candidateIds.length} admitted), so that is not vacuous`,
+  shelf.length > recDecision.candidateIds.length
+  && ALTERNATIVES.every(id => shelf.includes(id)));
+
+/*
+ * H — THE NON-FIRST ALTERNATIVE, so a `candidateIds[0]` default cannot hide.
+ *
+ * `NOT_PREFERRED` is chosen from the far end of the list and is already proved
+ * in section 0 to be neither the recommendation nor what an unlocked search
+ * reaches first.
+ */
+const ALT_A = NOT_PREFERRED;
+ok('AF-H: the alternative under test is not the first one offered',
+  ALT_A !== ALTERNATIVES[0] && ALT_A !== recDecision.partId);
+
+const overridden = build({ ...BASE, selectedParts: { [RANKED]: ALT_A } });
+const overDecision = dec(overridden, RANKED);
+ok('AF-H: the exact id pressed is the exact id the engine locks',
+  overDecision.partId === ALT_A);
+ok('AF-H: …reported as the READER’s, never as a recommendation',
+  overDecision.selectionSource === 'user-selected'
+  && overDecision.status === 'user-selected');
+ok('AF-H: …and the part in the build is that part',
+  overridden.parts[RANKED]?.id === ALT_A);
+
+/* I — budget is untouched, and does not win. */
+ok('AF-I: the budget answer is still in the input and still «mid»',
+  (BASE as { budgetTier: string }).budgetTier === 'mid');
+ok('AF-I: …and the engine did NOT put its preferred tier back',
+  overDecision.partId !== recDecision.partId);
+ok('AF-I: …every OTHER category is still ranked by that same budget answer',
+  overridden.decisions.some(d => d.category !== RANKED
+    && d.reasons.some(r => r.kind === 'ranking' && r.inputKey === 'budgetTier')));
+
+/* J + K — authorship moves by exactly one, and only for this category. */
+const beforeView = proposalView(baseline, VIEW_CTX);
+const afterView = proposalView(overridden, VIEW_CTX);
+ok('AF-J: the system is credited with one decision fewer',
+  afterView.counts.systemDecided === beforeView.counts.systemDecided - 1);
+ok('AF-K: …and the reader with one more',
+  afterView.counts.userSelected === beforeView.counts.userSelected + 1);
+ok('AF-K: the overridden category is no longer counted as system-decided',
+  !afterView.groups['system-decided'].some(d => d.category === RANKED)
+  && afterView.groups.chosen.some(d => d.category === RANKED));
+/*
+ * …and the HEADLINE is not forced. Other recommendations remain, so the build
+ * is still `proposed`. Claiming `reader-shaped` here would say the system
+ * settled nothing, which is false.
+ */
+ok('AF-J: the quality stays «proposed» while the system still decided things',
+  afterView.counts.systemDecided > 0 && afterView.quality === 'proposed');
+
+/* L + M — the reason is replaced, not accumulated. */
+const rankingReason = recDecision.reasons.find(
+  r => r.kind === 'ranking' && r.inputKey === 'budgetTier');
+ok('AF-L: the original decision really did rest on the budget ranking',
+  rankingReason !== undefined);
+ok('AF-L: after the override that ranking sentence is gone',
+  !overDecision.reasons.some(r => r.ar === rankingReason!.ar)
+  && !overDecision.reasons.some(r => r.kind === 'ranking'));
+ok('AF-M: and the engine’s own selection reason is what replaced it',
+  overDecision.reasons.some(r => r.kind === 'selection'
+    && r.evidence === 'user-input' && r.inputKey === 'selectedParts'));
+/*
+ * The UI authors NO sentence of its own about the swap. «اخترت بديلًا عن
+ * اقتراحنا» would be a claim the domain never made, and it would be the only
+ * reason on the card the engine could not stand behind.
+ */
+ok('AF-M: no component invents a sentence about overriding a recommendation',
+  !/بديلًا عن|بدلًا من اقتراح/.test(CARD_SRC + SCREEN_SRC));
+
+/* N — clearing restores the ENGINE’s answer, not a cached one. */
+const restored = build({ ...BASE, selectedParts: {} });
+ok('AF-N: clearing the choice returns the ordinary recommendation',
+  JSON.stringify(dec(restored, RANKED)) === JSON.stringify(recDecision));
+ok('AF-N: …and the whole build is identical to never having chosen',
+  JSON.stringify(restored) === JSON.stringify(baseline));
+/*
+ * The restoration is the ENGINE running again on one fewer lock. Nothing in
+ * the UI remembers the previous `partId` — a cached id would go stale the
+ * moment any other answer changed what the ranking prefers.
+ */
+ok('AF-N: no component caches a recommendation to put back later',
+  !/previousPart|lastRecommend|cachedPart|restorePart/.test(
+    PREVIEW_SRC + SCREEN_SRC + CARD_SRC));
+
+/* O — alternative A, back to the system, then a DIFFERENT alternative B. */
+const ALT_B = ALTERNATIVES.find(id => id !== ALT_A);
+ok('AF-O: a second, different alternative exists to switch to', ALT_B !== undefined);
+if (ALT_B !== undefined) {
+  const second = build({ ...BASE, selectedParts: { [RANKED]: ALT_B } });
+  ok('AF-O: A → clear → B lands on B, with nothing of A left',
+    dec(second, RANKED).partId === ALT_B
+    && dec(second, RANKED).selectionSource === 'user-selected');
+  ok('AF-O: …and B is genuinely a different part from A',
+    ALT_B !== ALT_A);
+}
+
+/*
+ * 11 — DOWNSTREAM RECOMPUTATION IS REAL, AND THE SCREEN SHOWS THE NEW ANSWER.
+ *
+ * A swap re-runs the whole search, so another category's recommendation,
+ * candidate list or availability MAY move. The test does not demand that it
+ * does — that would be a claim about this catalogue on this day. It demands
+ * that whatever the engine now says is what the screen prints.
+ */
+const overHtml = renderProposal(overridden);
+let comparedCategories = 0;
+for (const d of overridden.decisions) {
+  if (d.category === RANKED) continue;
+  const shown = overridden.parts[d.category];
+  if (shown === undefined) continue;
+  comparedCategories++;
+  ok(`AF-11: «${d.category}» on screen is the RECOMPUTED engine answer`,
+    overHtml.includes(shown.nameAr));
+}
+ok(`AF-11: …and that was checked on real categories (${comparedCategories})`,
+  comparedCategories >= 4);
+/*
+ * Non-vacuity of the comparison itself: at least one category's rendered name
+ * is read from the NEW build, so a screen that kept the old decisions would
+ * have to agree with the new ones by coincidence on every one of them.
+ */
+/*
+ * Reported EXCLUDING the swapped category — including it made the comparison
+ * trivially true and the line always read «other categories moved too», which
+ * is an observation about the swap itself rather than about its consequences.
+ */
+const partIds = (b: ProposedBuild) => Object.fromEntries(
+  Object.entries(b.parts).filter(([c]) => c !== RANKED).map(([c, pt]) => [c, pt.id]));
+const elsewhereMoved = JSON.stringify(partIds(baseline)) !== JSON.stringify(partIds(overridden));
+console.log(`      other categories after the «${RANKED}» override: `
+  + `${elsewhereMoved ? 'some moved' : 'none moved — the screen is still checked against the new build'}`);
+ok('AF-11: the override itself is visible in the parts map',
+  baseline.parts[RANKED].id !== overridden.parts[RANKED].id
+  && overridden.parts[RANKED].id === ALT_A);
+
+/*
+ * THE PRESS ITSELF — the one thing a static render cannot show.
+ *
+ * `renderToStaticMarkup` produces the markup and fires nothing, so every
+ * assertion above is about what the button LOOKS like. «The id pressed is the
+ * id sent» is about what it DOES, and a UI that quietly sent `ids[0]` for every
+ * row would satisfy all of them: the markup would be correct and the behaviour
+ * wrong.
+ *
+ * `PartOptionList` holds no hooks, so it can be called as a plain function and
+ * the element tree it returns walked until the button for a given id turns up.
+ * Then its own `onClick` is invoked. That is a real press, without a browser.
+ */
+type El = { props?: Record<string, unknown>; [k: string]: unknown };
+const findEl = (node: unknown, hit: (el: El) => boolean): El | null => {
+  if (Array.isArray(node)) {
+    for (const n of node) { const f = findEl(n, hit); if (f) return f; }
+    return null;
+  }
+  if (node === null || typeof node !== 'object') return null;
+  const el = node as El;
+  if (hit(el)) return el;
+  return findEl((el.props ?? {}).children, hit);
+};
+
+const pressed: [string, string, string][] = [];
+const optionTree = (PartOptionList as unknown as (p: Record<string, unknown>) => unknown)({
+  category: RANKED,
+  ids: ALTERNATIVES,
+  categoryParts: BY_CATEGORY[RANKED],
+  testId: 'probe-list',
+  note: PROPOSAL.alternatives.note,
+  onChoose: (c: string, id: string, ar: string) => pressed.push([c, id, ar]),
+});
+const altButtonFor = (id: string) => findEl(optionTree,
+  el => (el.props ?? {})['data-testid'] === `v2-choose-${RANKED}-${id}`);
+
+ok('AF-H: every alternative has a findable button in the tree',
+  ALTERNATIVES.every(id => altButtonFor(id) !== null));
+/* Press the LAST one — a `ids[0]` default is only visible from a later row. */
+const lastAlt = ALTERNATIVES[ALTERNATIVES.length - 1];
+ok('AF-H: the row pressed is not the first offered',
+  ALTERNATIVES.length > 1 && lastAlt !== ALTERNATIVES[0]);
+(altButtonFor(lastAlt)!.props!.onClick as () => void)();
+/*
+ * Optional chaining, deliberately: a mutation that SWALLOWS the press leaves
+ * `pressed` empty, and reading `pressed[0][0]` would throw and take the rest
+ * of the suite with it — hiding every other thing that probe broke. A probe
+ * must report, not crash.
+ */
+ok('AF-H: pressing a row sends THAT row’s id, not the list’s first',
+  pressed.length === 1 && pressed[0]?.[1] === lastAlt);
+ok('AF-H: …with its own category and its own Arabic name alongside',
+  pressed[0]?.[0] === RANKED
+  && pressed[0]?.[2] === BY_CATEGORY[RANKED][lastAlt].nameAr);
+/* And every row is wired to the same handler — none is inert or private. */
+pressed.length = 0;
+for (const id of ALTERNATIVES) (altButtonFor(id)!.props!.onClick as () => void)();
+ok('AF-H: every row reaches the handler, each with its own id, in order',
+  pressed.length === ALTERNATIVES.length
+  && pressed.every(([, id], i) => id === ALTERNATIVES[i]));
+
+/*
+ * …AND A SWAP THAT GENUINELY MOVES SOMETHING ELSE.
+ *
+ * Measured across the catalogue: of the 136 single swaps a reader can make,
+ * only 6 change another category at all. The `frames` swap above is not one of
+ * them, so on its own this suite would only ever prove «the screen agrees with
+ * the engine when the engine did not change its mind» — which is the easy
+ * half.
+ *
+ * This is the hard half. On a BUDGET Freestyle, taking the premium frame
+ * withdraws the propeller recommendation entirely: that category stops being
+ * settled and becomes a question. A screen holding on to its previous
+ * decisions would still be printing a propeller the engine no longer
+ * recommends, under a heading that says the system decided it.
+ */
+const MOVER = { droneTypeId: 'freestyle', cellCount: 6, budgetTier: 'budget', owned: {} };
+const moverBase = build(MOVER);
+const moverFrames = dec(moverBase, 'frames');
+const PREMIUM_FRAME = moverFrames.candidateIds.find(
+  id => id !== moverFrames.partId
+    && JSON.stringify(dec(build({ ...MOVER, selectedParts: { frames: id } }), 'propellers'))
+      !== JSON.stringify(dec(moverBase, 'propellers')));
+ok('AF-11: a swap that really does move another category exists in this catalogue',
+  PREMIUM_FRAME !== undefined);
+
+if (PREMIUM_FRAME !== undefined) {
+  const moverAfter = build({ ...MOVER, selectedParts: { frames: PREMIUM_FRAME } });
+  const propsBefore = dec(moverBase, 'propellers');
+  const propsAfter = dec(moverAfter, 'propellers');
+  const droppedName = moverBase.parts.propellers?.nameAr;
+
+  ok('AF-11: before the swap the propellers were settled by the system',
+    propsBefore.status === 'recommended' && propsBefore.selectionSource === 'system'
+    && droppedName !== undefined);
+  ok('AF-11: after it they are an open question again',
+    propsAfter.status === 'choice-required' && propsAfter.partId === undefined
+    && moverAfter.parts.propellers === undefined);
+
+  const moverBeforeHtml = renderProposal(moverBase);
+  const moverAfterHtml = renderProposal(moverAfter);
+  ok('AF-11: the withdrawn recommendation WAS on the page before the swap',
+    moverBeforeHtml.includes(droppedName!)
+    && moverBeforeHtml.includes('data-testid="v2-group-system-decided"'));
+  ok('AF-11: …and the page after the swap no longer presents it as settled',
+    !new RegExp(`data-testid="v2-cat-propellers" data-status="recommended"`)
+      .test(moverAfterHtml));
+  ok('AF-11: …the category has moved into «نحتاج اختيارك» with its candidates',
+    moverAfterHtml.includes('data-testid="v2-group-needs-you"')
+    && moverAfterHtml.includes('data-testid="v2-candidates-propellers"'));
+  ok('AF-11: …and it offers the reader every candidate the engine now returns',
+    propsAfter.candidateIds.every(id =>
+      moverAfterHtml.includes(`data-testid="v2-choose-propellers-${id}"`)));
+  /*
+   * The burden line is recomputed too — the reader is told the system now
+   * needs one more answer from them than it did a moment ago.
+   */
+  const burdenBefore = proposalView(moverBase, VIEW_CTX).counts;
+  const burdenAfter = proposalView(moverAfter, VIEW_CTX).counts;
+  ok('AF-11: the decision burden reported to the reader goes UP by one',
+    burdenAfter.choiceRequired === burdenBefore.choiceRequired + 1);
+  ok('AF-11: …and the copy warned that exactly this could happen',
+    PROPOSAL.alternatives.note.includes('قد يغيّر'));
+}
+
+// ── The rendered control ───────────────────────────────────────────────────
+const recHtml = renderProposal(baseline);
+ok('AF-T: the alternatives are behind a closed disclosure, not on the page',
+  new RegExp(`data-testid="v2-show-alternatives-${RANKED}"[^>]*aria-expanded="false"`)
+    .test(recHtml));
+ok('AF-T: …and the label carries the count in Arabic digits',
+  new RegExp(`data-testid="v2-show-alternatives-${RANKED}"[\\s\\S]{0,300}?[٠-٩]`).test(recHtml));
+ok('AF-T: the disclosure names its category, so eight of them are distinguishable',
+  new RegExp(`data-testid="v2-show-alternatives-${RANKED}"[^>]*aria-label="[^"]*`
+    + `${PART_VOCAB[RANKED]!.ar}"`).test(recHtml));
+const altButtons = [...recHtml.matchAll(
+  new RegExp(`data-testid="v2-choose-${RANKED}-([^"]+)"`, 'g'))].map(m => m[1]);
+ok('AF-F: the rendered alternatives are exactly the engine’s, minus the recommendation',
+  altButtons.length === ALTERNATIVES.length
+  && ALTERNATIVES.every(id => altButtons.includes(id)));
+ok('AF-E: …and the recommendation itself has no «choose me» button',
+  !altButtons.includes(recDecision.partId!));
+ok('AF-Y: no id reaches anything spoken or shown on that page',
+  [...recHtml.matchAll(/aria-label="([^"]*)"/g)].map(m => m[1])
+    .every(l => ![...ALL_IDS].some(id => l.includes(id)))
+  && KEYS.every(k => !recHtml.replace(/<[^>]*>/g, ' ').includes(k)));
+/* The consequence is stated where the reader will act on it. */
+ok('AF: the panel says these are viable alternatives, not better ones',
+  recHtml.includes(PROPOSAL.alternatives.title)
+  && !/أفضل|موصى/.test(PROPOSAL.alternatives.title));
+ok('AF: …and warns that a swap can move other cards',
+  recHtml.includes(PROPOSAL.alternatives.note)
+  && PROPOSAL.alternatives.note.includes('قطع أخرى'));
+
+/*
+ * AND THE SWAPPED CARD BECOMES AN ORDINARY PHASE 2E CHOICE — same badge, same
+ * undo, no second mechanism. The swap is a way IN to `selectedParts`, not a
+ * parallel feature with its own state.
+ */
+ok('AF: after the override the card is an ordinary reader choice',
+  overHtml.includes(`data-testid="v2-change-choice-${RANKED}"`)
+  && new RegExp(`data-testid="v2-badge-${RANKED}"[^>]*>${PROPOSAL.selectedBadge}`)
+    .test(overHtml));
+ok('AF: …and offers no alternatives control of its own any more',
+  !overHtml.includes(`data-testid="v2-show-alternatives-${RANKED}"`));
 
 
 console.log(`\n[reader selection] ${passed} passed, ${failures.length} failed`);

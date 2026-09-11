@@ -29,7 +29,7 @@ import type { ProposedBuild } from '../src/data/assembly/recommendation/types';
 import { PART_CATEGORY_MAP } from '../src/data/project/store';
 import { SHARED_COMPAT_RULES } from '../src/data/assembly/compatibility/rules';
 import {
-  proposalView, proposalBurdenAr, groupOf, proposalDefects,
+  proposalView, proposalBurdenAr, groupOf, proposalDefects, candidatesOf,
   type ProposalContext, type ProposalDefectKind,
 } from '../web/components/build/v2/proposalModel';
 import { COMPAT_RULE_LABEL_AR, compatRuleLabelAr } from '../web/components/build/v2/compatLabels';
@@ -227,8 +227,23 @@ section('4 — A TIE IS SHOWN AS A TIE');
 // ═══════════════════════════════════════════════════════════════════════════
 const tied = b(FREESTYLE_MID).decisions.find(d => d.status === 'choice-required')!;
 ok('the tied category has more than one survivor', tied.candidateIds.length > 1);
-ok('EVERY candidate is rendered, none filtered',
-  /decision\.candidateIds\.map/.test(src['ProposalCategoryCard.tsx']));
+/*
+ * NOTHING IS FILTERED ON THE WAY TO THE SCREEN.
+ *
+ * This read `/decision\.candidateIds\.map/` — a grep for one expression in one
+ * component — and it broke the moment Phase 2F extracted the row renderer so
+ * that a `recommended` card's alternatives and a tie's candidates could share
+ * one button, one accessible name and one 44px floor. Nothing about what a
+ * reader sees had changed.
+ *
+ * The claim is about the LIST, so it is asked of the list: the model hands the
+ * screen every surviving id, in order. The RENDERED half — every one of those
+ * ids reaches a real button — is asserted in section 12, where the card is
+ * actually rendered.
+ */
+ok('EVERY candidate reaches the screen, none filtered',
+  candidatesOf(tied).length === tied.candidateIds.length
+  && candidatesOf(tied).every((id, i) => id === tied.candidateIds[i]));
 ok('every candidate carries data-selected="false"',
   /data-selected="false"/.test(src['ProposalCategoryCard.tsx']));
 ok('no candidate is ever marked selected',
@@ -957,7 +972,12 @@ const renderToStaticMarkup = (webRequire('react-dom/server') as {
   renderToStaticMarkup: Renderer;
 }).renderToStaticMarkup;
 
-const renderCard = (category: string, categoryLabelAr: string) => {
+const renderCard = (
+  category: string,
+  categoryLabelAr: string,
+  over: Record<string, unknown> = {},
+  props: Record<string, unknown> = {},
+) => {
   const html = renderToStaticMarkup(ReactRT.createElement(ProposalCategoryCard, {
     decision: {
       category,
@@ -967,12 +987,17 @@ const renderCard = (category: string, categoryLabelAr: string) => {
       candidateIds: [],
       compatibility: [],
       reasons: [],
+      ...over,
     },
     parts: {},
-    categoryParts: {},
+    categoryParts: BY_CATEGORY[category] ?? {},
     categoryLabelAr,
     compact: false,
     expandCandidates: false,
+    onChoose: () => {},
+    onClearChoice: () => {},
+    takeFocus: false,
+    ...props,
   }));
   return {
     heading: (/<h4[^>]*>([\s\S]*?)<\/h4>/.exec(html)?.[1] ?? '').trim(),
@@ -981,6 +1006,66 @@ const renderCard = (category: string, categoryLabelAr: string) => {
     html,
   };
 };
+
+/*
+ * THE RENDERED HALF OF «NOTHING IS FILTERED» — see section 4.
+ *
+ * The model hands the screen every surviving id; this proves every one of them
+ * reaches a real button the reader can press. Together the two cover the claim
+ * without either standing in for the other.
+ */
+const tieCard = renderCard(tied.category, PART_VOCAB[tied.category]!.ar,
+  { status: tied.status, candidateIds: tied.candidateIds }, { expandCandidates: true });
+ok(`every one of the ${tied.candidateIds.length} candidates renders a button`,
+  tied.candidateIds.every(id =>
+    tieCard.html.includes(`data-testid="v2-choose-${tied.category}-${id}"`)));
+ok('…and the card offers no extra option beyond what the engine returned',
+  (tieCard.html.match(/data-testid="v2-choose-/g) ?? []).length
+    === tied.candidateIds.length);
+
+/*
+ * PHASE 2F — WHICH SETTLED CARDS OFFER A SWAP, AND WHICH MUST NOT.
+ *
+ * Rendered rather than grepped, because «no control on an owned part» is a
+ * statement about what reaches the screen. Each case is the SAME decision
+ * shape with one field changed, so the status is visibly what decides.
+ */
+const swapFixture = {
+  partId: tied.candidateIds[0],
+  candidateIds: tied.candidateIds,
+  selectionSource: 'system',
+};
+const swapOf = (status: string, extra: Record<string, unknown> = {}) =>
+  renderCard(tied.category, PART_VOCAB[tied.category]!.ar,
+    { ...swapFixture, status, ...extra }).html;
+ok('a recommended card with alternatives offers the swap control',
+  swapOf('recommended').includes(`data-testid="v2-show-alternatives-${tied.category}"`));
+for (const [status, why] of [
+  ['only-compatible', 'exactly one viable option survived'],
+  ['user-locked', 'the reader says they own it'],
+  ['unavailable', 'there is nothing to swap to'],
+] as const) {
+  ok(`a ${status} card offers none — ${why}`,
+    !swapOf(status, status === 'user-locked' ? { selectionSource: 'user-owned' } : {})
+      .includes('v2-show-alternatives-'));
+}
+ok('a choice-required card still uses the candidate list, not the swap control',
+  swapOf('choice-required', { partId: undefined, selectionSource: 'none' })
+    .includes(`data-testid="v2-show-candidates-${tied.category}"`)
+  && !swapOf('choice-required', { partId: undefined, selectionSource: 'none' })
+    .includes('v2-show-alternatives-'));
+/*
+ * A RECOMMENDATION WITH NOTHING ELSE BEHIND IT SHOWS NO DEAD BUTTON.
+ *
+ * Not reachable from the live catalogue — every one of the 266 recommended
+ * decisions across every reader carries at least one alternative — so it is
+ * constructed. A control that opens an empty list is the failure this guards.
+ */
+ok('a recommended card whose only candidate is the recommendation offers no swap',
+  !renderCard(tied.category, PART_VOCAB[tied.category]!.ar, {
+    status: 'recommended', selectionSource: 'system',
+    partId: tied.candidateIds[0], candidateIds: [tied.candidateIds[0]],
+  }).html.includes('v2-show-alternatives-'));
 
 const realCard = renderCard('frames', PART_VOCAB.frames.ar);
 ok('a real category renders its Arabic name as the heading',

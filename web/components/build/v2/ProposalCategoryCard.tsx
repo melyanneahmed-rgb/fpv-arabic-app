@@ -22,8 +22,21 @@ const Ltr: React.FC<{ children: React.ReactNode }> = ({ children }) => (
  * a clickable `<div>` — which is what the audit found on V1's spec rows.
  */
 const Disclose: React.FC<{
-  label: string; testId: string; children: React.ReactNode; defaultOpen?: boolean;
-}> = ({ label, testId, children, defaultOpen = false }) => {
+  label: string;
+  testId: string;
+  children: React.ReactNode;
+  defaultOpen?: boolean;
+  /**
+   * A longer name for the accessibility tree, when the visible label is not
+   * unique on the page.
+   *
+   * «تغيير القطعة» on eight cards is eight identically-named buttons to a
+   * reader moving by control, and nothing tells them which category each one
+   * belongs to. It must CONTAIN the visible label — otherwise voice control
+   * loses the ability to reach the button by what is written on it.
+   */
+  ariaLabel?: string;
+}> = ({ label, testId, children, defaultOpen = false, ariaLabel }) => {
   const [open, setOpen] = useState(defaultOpen);
   const panelId = useId();
   return (
@@ -33,6 +46,7 @@ const Disclose: React.FC<{
         data-testid={testId}
         aria-expanded={open}
         aria-controls={panelId}
+        aria-label={ariaLabel}
         onClick={() => setOpen(o => !o)}
         style={{
           justifySelf: 'start', minHeight: 44, padding: '10px 2px',
@@ -348,6 +362,36 @@ export const ProposalCategoryCard: React.FC<{
       )}
 
       {/*
+        A SETTLED CATEGORY THE READER MAY STILL OVERRULE.
+
+        Only `recommended`. The other settled statuses are not preferences the
+        engine expressed, so there is nothing to overrule:
+
+          only-compatible  exactly one viable option survived. A «change»
+                           button with nothing behind it is a dead control,
+                           and padding the list with parts the search already
+                           rejected would offer a choice that cannot be taken.
+                           The absence of alternatives IS the answer.
+          user-locked      the reader said they OWN this. Quietly treating
+                           owned hardware as a suggestion is the exact
+                           conflation the domain keeps two fields apart to
+                           prevent; changing it belongs to the owned-equipment
+                           question, not to a card on the proposal.
+          user-selected    already carries «تغيير الاختيار» from Phase 2E.
+          unavailable      there is nothing to swap TO.
+          choice-required  nothing was recommended, so the list is the whole
+                           card — that is `Candidates`, above.
+      */}
+      {decision.status === 'recommended' && (
+        <Alternatives
+          decision={decision}
+          categoryParts={categoryParts}
+          categoryLabelAr={categoryLabelAr}
+          onChoose={onChoose}
+        />
+      )}
+
+      {/*
         THE OPEN DECISION. Every surviving candidate, in the catalogue's own
         order, with NONE marked. `candidateIds[0]` is not a winner and the
         `provenPath` member is not a pick — that path proves a complete build
@@ -388,6 +432,98 @@ export const ProposalCategoryCard: React.FC<{
  * button costs, so «nothing is selected yet» is stated rather than implied by
  * an absence of highlighting.
  */
+/**
+ * ONE ROW, ONE BUTTON, ONE CONTRACT — wherever a part can be chosen.
+ *
+ * Phase 2E gave `choice-required` its list; Phase 2F gives a `recommended`
+ * category its alternatives. The two answer different questions but they take
+ * the SAME action — an id goes into `selectedParts` and the engine runs again
+ * — so they render through the same component. A second row renderer would be
+ * a second place for the accessible name, the 44px floor and the «never show
+ * the id» rule to drift out of agreement.
+ *
+ * EXPORTED FOR ONE REASON: it holds no hooks, so a test can call it as a plain
+ * function, walk the elements it returns and INVOKE the button's own handler.
+ * That is the only way to prove «the id pressed is the id sent» without a
+ * browser — a static render shows the markup but never fires anything, and a
+ * source pattern is not a behaviour. `scripts/testReaderSelection.ts` does
+ * exactly that, so a mutation that sends `ids[0]` regardless of the row fails
+ * there rather than surviving to the end-to-end walk.
+ */
+export const PartOptionList: React.FC<{
+  category: string;
+  /** Exactly the ids to offer. The CALLER decides which; this draws them. */
+  ids: readonly string[];
+  categoryParts: Readonly<Record<string, BasePart>>;
+  testId: string;
+  /** One line under the list saying what pressing a row costs. */
+  note: string;
+  onChoose: (category: string, partId: string, partAr: string) => void;
+}> = ({ category, ids, categoryParts, testId, note, onChoose }) => (
+  <div style={{ display: 'grid', gap: 7 }}>
+    <ul data-testid={testId}
+      style={{ margin: 0, padding: 0, display: 'grid', gap: 6, listStyle: 'none' }}>
+      {/*
+        NO `?? id` FALLBACK. An id this CATEGORY cannot resolve — missing
+        entirely, or real but belonging to another category — is an integrity
+        defect that refuses the whole proposal upstream, so every id here is
+        known to resolve on this shelf. The non-null assertion is that
+        guarantee written down: if it ever breaks, the reader gets a refusal,
+        not a database key wearing a product's clothes, and not a frame
+        wearing a receiver's.
+      */}
+      {ids.map(id => {
+        const c = categoryParts[id]!;
+        return (
+          <li key={id} data-testid={`v2-candidate-${id}`} data-selected="false"
+            style={{
+              padding: '9px 11px', border: '1px solid var(--border-soft)',
+              borderRadius: 8, display: 'flex', gap: 10,
+              alignItems: 'center', justifyContent: 'space-between',
+              flexWrap: 'wrap',
+            }}>
+            <span style={{ display: 'grid', gap: 3, minWidth: 0 }}>
+              <span style={{ fontSize: 13.5, fontWeight: 700 }}>{c.nameAr}</span>
+              <span style={{ fontSize: 11.5, color: 'var(--text-dimmer)' }}>
+                <Ltr>{c.brand ? `${c.brand} · ${c.nameEn}` : c.nameEn}</Ltr>
+              </span>
+            </span>
+            {/*
+              A REAL BUTTON, AND ITS NAME CARRIES THE PART.
+
+              «اختيار» alone is what a sighted reader needs — the product is
+              the line it sits on. A screen-reader user moving by control
+              hears only the accessible name, so eight rows would be eight
+              buttons called «اختيار» and the list would be unusable. The
+              visible word opens the accessible name rather than being
+              replaced by it, so voice control still reaches it by what is
+              written on it.
+
+              The id is never spoken or shown: it is what gets SENT.
+            */}
+            <button
+              type="button"
+              data-testid={`v2-choose-${category}-${id}`}
+              aria-label={`${PROPOSAL.candidates.choose} ${c.nameAr}`}
+              onClick={() => onChoose(category, id, c.nameAr)}
+              className="btn-ghost"
+              style={{
+                minHeight: 44, padding: '10px 18px', fontSize: 13,
+                fontWeight: 800, cursor: 'pointer', flexShrink: 0,
+              }}
+            >
+              {PROPOSAL.candidates.choose}
+            </button>
+          </li>
+        );
+      })}
+    </ul>
+    <p style={{ margin: 0, fontSize: 11.5, color: 'var(--text-dimmer)', lineHeight: 1.8 }}>
+      {note}
+    </p>
+  </div>
+);
+
 const Candidates: React.FC<{
   decision: CategoryDecision;
   categoryParts: Readonly<Record<string, BasePart>>;
@@ -395,68 +531,14 @@ const Candidates: React.FC<{
   onChoose: (category: string, partId: string, partAr: string) => void;
 }> = ({ decision, categoryParts, defaultOpen, onChoose }) => {
   const list = (
-        <div style={{ display: 'grid', gap: 7 }}>
-          <ul data-testid={`v2-candidates-${decision.category}`}
-            style={{ margin: 0, padding: 0, display: 'grid', gap: 6, listStyle: 'none' }}>
-            {/*
-              NO `?? id` FALLBACK. A candidate this CATEGORY cannot resolve —
-              missing entirely, or real but belonging to another category — is
-              an integrity defect that refuses the whole proposal upstream, so
-              every id here is known to resolve on this shelf. The non-null
-              assertion is that guarantee written down: if it ever breaks, the
-              reader gets a refusal, not a database key wearing a product's
-              clothes, and not a frame wearing a receiver's.
-            */}
-            {decision.candidateIds.map(id => {
-              const c = categoryParts[id]!;
-              return (
-                <li key={id} data-testid={`v2-candidate-${id}`} data-selected="false"
-                  style={{
-                    padding: '9px 11px', border: '1px solid var(--border-soft)',
-                    borderRadius: 8, display: 'flex', gap: 10,
-                    alignItems: 'center', justifyContent: 'space-between',
-                    flexWrap: 'wrap',
-                  }}>
-                  <span style={{ display: 'grid', gap: 3, minWidth: 0 }}>
-                    <span style={{ fontSize: 13.5, fontWeight: 700 }}>{c.nameAr}</span>
-                    <span style={{ fontSize: 11.5, color: 'var(--text-dimmer)' }}>
-                      <Ltr>{c.brand ? `${c.brand} · ${c.nameEn}` : c.nameEn}</Ltr>
-                    </span>
-                  </span>
-                  {/*
-                    A REAL BUTTON, AND ITS NAME CARRIES THE PART.
-
-                    «اختيار» alone is what a sighted reader needs — the product
-                    is the line it sits on. A screen-reader user moving by
-                    control hears only the accessible name, so eight rows would
-                    be eight buttons called «اختيار» and the list would be
-                    unusable. The visible word opens the accessible name rather
-                    than being replaced by it, so voice control still reaches it
-                    by what is written on it.
-
-                    The id is never spoken or shown: it is what gets SENT.
-                  */}
-                  <button
-                    type="button"
-                    data-testid={`v2-choose-${decision.category}-${id}`}
-                    aria-label={`${PROPOSAL.candidates.choose} ${c.nameAr}`}
-                    onClick={() => onChoose(decision.category, id, c.nameAr)}
-                    className="btn-ghost"
-                    style={{
-                      minHeight: 44, padding: '10px 18px', fontSize: 13,
-                      fontWeight: 800, cursor: 'pointer', flexShrink: 0,
-                    }}
-                  >
-                    {PROPOSAL.candidates.choose}
-                  </button>
-                </li>
-              );
-            })}
-          </ul>
-          <p style={{ margin: 0, fontSize: 11.5, color: 'var(--text-dimmer)', lineHeight: 1.8 }}>
-            {PROPOSAL.candidates.instruction}
-          </p>
-        </div>
+    <PartOptionList
+      category={decision.category}
+      ids={decision.candidateIds}
+      categoryParts={categoryParts}
+      testId={`v2-candidates-${decision.category}`}
+      note={PROPOSAL.candidates.instruction}
+      onChoose={onChoose}
+    />
   );
 
   const label = `${PROPOSAL.candidates.show} (${arabicNumber(decision.candidateIds.length)})`;
@@ -469,5 +551,65 @@ const Candidates: React.FC<{
         </Disclose>
       )}
     </div>
+  );
+};
+
+/**
+ * THE OTHER PARTS THAT WOULD ALSO WORK — behind a closed door.
+ *
+ * A settled category is settled: the engine ranked what survived and one came
+ * out ahead, and that is what the card says. This adds the second half of the
+ * beginner's sentence — «دعني أغيّر قطعة إذا أردت» — without turning the
+ * proposal back into the catalogue wall V2 exists to replace.
+ *
+ * CLOSED BY DEFAULT, AND THAT IS NOT A PREFERENCE
+ * -----------------------------------------------
+ * A system-shaped build can settle six categories. Six open alternative lists
+ * is V1's step 10 rebuilt out of new parts, and the measurement that named
+ * that failure — 31 rows, 5.12 phone viewports — is in `ProposalScreen`. So
+ * the reader opens one category at a time, by asking.
+ *
+ * WHERE THE LIST COMES FROM
+ * -------------------------
+ * `decision.candidateIds`, minus the part already recommended. Nothing else.
+ * Not `PART_CATEGORY_MAP[category]`, which is the whole shelf including
+ * everything the engine filtered out — offering those would be presenting
+ * parts the search has already proven cannot finish this build.
+ */
+const Alternatives: React.FC<{
+  decision: CategoryDecision;
+  categoryParts: Readonly<Record<string, BasePart>>;
+  categoryLabelAr: string;
+  onChoose: (category: string, partId: string, partAr: string) => void;
+}> = ({ decision, categoryParts, categoryLabelAr, onChoose }) => {
+  /*
+   * THE CURRENT RECOMMENDATION IS NOT ONE OF ITS OWN ALTERNATIVES.
+   *
+   * Leaving it in the list would offer the reader a «choice» that changes the
+   * part not at all — and would change its provenance from «اقترحناه لك» to
+   * «اخترتها», which is a different claim about who decided.
+   */
+  const ids = decision.candidateIds.filter(id => id !== decision.partId);
+  if (ids.length === 0) return null;
+
+  const label = `${PROPOSAL.alternatives.show} (${arabicNumber(ids.length)})`;
+  return (
+    <Disclose
+      label={label}
+      ariaLabel={`${label} — ${categoryLabelAr}`}
+      testId={`v2-show-alternatives-${decision.category}`}
+    >
+      <div style={{ display: 'grid', gap: 7 }}>
+        <strong style={{ fontSize: 12.5 }}>{PROPOSAL.alternatives.title}</strong>
+        <PartOptionList
+          category={decision.category}
+          ids={ids}
+          categoryParts={categoryParts}
+          testId={`v2-alternatives-${decision.category}`}
+          note={PROPOSAL.alternatives.note}
+          onChoose={onChoose}
+        />
+      </div>
+    </Disclose>
   );
 };

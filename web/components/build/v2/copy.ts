@@ -322,6 +322,44 @@ export const PROPOSAL = {
   },
 
   /*
+   * WHEN THE SYSTEM HAS ALREADY CHOSEN, AND THE READER WANTS SOMETHING ELSE
+   * ======================================================================
+   *
+   * A `recommended` category is settled — the engine ranked the viable
+   * candidates against the reader's own budget answer and one came out ahead.
+   * But the beginner journey this product is for is «اقترح لي بناءً مناسبًا»
+   * followed by «دعني أغيّر قطعة إذا أردت», and until Phase 2F the second half
+   * had no control at all: the alternatives were sitting in `candidateIds` and
+   * the card never offered them.
+   *
+   * WHAT THIS COPY MUST NOT SAY
+   * ---------------------------
+   * · NOT «قطع أفضل» or «قطع موصى بها» — the engine recommended ONE of these,
+   *   and the rest are what survived the same filters. «صالحة» is the whole of
+   *   what is known about them: they work in this build.
+   * · NOT a promise that the rest of the proposal stays put. Locking an
+   *   alternative re-runs the whole search, and another category's
+   *   recommendation, candidate list or availability may genuinely change. A
+   *   reader who is not told that reads the next screen as a bug.
+   */
+  alternatives: {
+    /*
+     * The disclosure answers the question the reader actually has — «can I
+     * change this?» — rather than describing the widget. The panel it opens is
+     * titled honestly, so nothing is promised that the list does not deliver,
+     * and the count rides on the label so the weight is known before opening.
+     */
+    show: 'تغيير القطعة',
+    title: 'بدائل صالحة لهذا البناء',
+    /*
+     * The consequence, in one line. This is the sentence that keeps the next
+     * screen from looking broken: the engine re-runs on every lock, so a swap
+     * here can move a recommendation two cards down.
+     */
+    note: 'اختيار بديل قد يغيّر اقتراحات قطع أخرى.',
+  },
+
+  /*
    * A manual check is a finding the DATA cannot settle. While one is open the
    * build is not «متوافق بالكامل», and this screen never says it is.
    */

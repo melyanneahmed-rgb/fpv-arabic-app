@@ -24,6 +24,21 @@ import { mkdirSync } from 'node:fs';
 import { chromium, type Browser, type Page } from 'playwright';
 import { chromiumLaunchOptions } from './lib/browser';
 import { PART_VOCAB } from '../web/lib/build/labels';
+import { proposeBuild } from '../src/data/assembly/recommendation/proposeBuild';
+import type { RecommendationInput } from '../src/data/assembly/recommendation/types';
+
+/**
+ * THE ENGINE, RUN IN NODE, SO THE BROWSER CAN BE CHECKED AGAINST IT.
+ *
+ * Phase 2F's hardest claim is «after a swap, every other card shows the
+ * RECOMPUTED answer». Asserting that from the DOM alone can only ever say «it
+ * changed» or «it did not», neither of which is the claim. So the expected
+ * build is computed here, from the same function the page calls, and the page
+ * is compared to it field by field.
+ */
+const engine = (over: Record<string, unknown> = {}) => proposeBuild({
+  droneTypeId: 'freestyle', cellCount: 6, budgetTier: 'mid', owned: {}, ...over,
+} as unknown as RecommendationInput);
 
 const PORT = 3181;
 const BASE = `http://localhost:${PORT}`;
@@ -1320,6 +1335,209 @@ async function main() {
       if (name === '390px') {
         await page.screenshot({ path: `${SHOTS}/16-ecosystem-cleared-receiver-390.png`, fullPage: true });
       }
+
+      // ── G3. OVERRULING A RECOMMENDATION ───────────────────────────────────
+      /*
+       * PHASE 2F, IN A REAL BROWSER.
+       *
+       * The beginner journey is «اقترح لي بناءً مناسبًا» and then «دعني أغيّر
+       * قطعة إذا أردت». Phase 2E answered the first half's open decisions;
+       * this is the second half, on the categories the system settled.
+       *
+       * Every expectation below is computed from `proposeBuild` in node and
+       * compared against the DOM, so «the other cards show the recomputed
+       * answer» is checked against the engine rather than against a guess
+       * about what ought to have moved.
+       */
+      console.log(`\n[G3] ${name} — changing a part the system recommended`);
+
+      const base = engine();
+      const swapCat = base.decisions.find(d =>
+        d.status === 'recommended'
+        && d.candidateIds.filter(id => id !== d.partId).length > 1)!;
+      const swapAlts = swapCat.candidateIds.filter(id => id !== swapCat.partId);
+      /* The LAST alternative, so a `candidateIds[0]` default cannot hide. */
+      const altA = swapAlts[swapAlts.length - 1];
+      const altB = swapAlts[0];
+      const partName = (b: ReturnType<typeof engine>, c: string) => b.parts[c]?.nameAr ?? '';
+
+      await freestyle6S(page);
+      await page.click('[data-testid="v2-owned-none"]');
+      await page.click('[data-testid="v2-next"]');
+      await page.waitForTimeout(250);
+      await page.click('[data-testid="v2-open-proposal"]');
+      await page.waitForSelector('[data-testid="v2-proposal"]', { timeout: 15000 });
+
+      const swapToggle = `[data-testid="v2-show-alternatives-${swapCat.category}"]`;
+      const statusOfCat = (c: string) =>
+        page.locator(`[data-testid="v2-cat-${c}"]`).getAttribute('data-status');
+      const sourceOfCat = (c: string) =>
+        page.locator(`[data-testid="v2-cat-${c}"]`).getAttribute('data-source');
+      const shownPart = async (c: string) =>
+        ((await page.locator(`[data-testid="v2-part-name-${c}"]`).first().textContent())
+          ?? '').trim();
+
+      ok(`${name}: «${swapCat.category}» arrives as a system recommendation`,
+        await statusOfCat(swapCat.category) === 'recommended'
+        && await sourceOfCat(swapCat.category) === 'system');
+      ok(`${name}: …showing the part the engine ranked first`,
+        await shownPart(swapCat.category) === partName(base, swapCat.category));
+      ok(`${name}: the swap control is offered`,
+        await page.locator(swapToggle).count() === 1);
+
+      /*
+       * CLOSED BY DEFAULT, ON EVERY RECOMMENDED CARD. Six open alternative
+       * lists is V1's step 10 rebuilt — the failure this whole journey exists
+       * to undo.
+       */
+      const toggles = await page.locator('[data-testid^="v2-show-alternatives-"]').all();
+      const anyOpen = await Promise.all(
+        toggles.map(t => t.getAttribute('aria-expanded')));
+      ok(`${name}: every alternatives list starts closed (${toggles.length} cards)`,
+        toggles.length > 0 && anyOpen.every(v => v === 'false'));
+      const beforeMetrics = await page.evaluate(() => {
+        const el = document.querySelector('[data-testid="v2-proposal"]')!;
+        return {
+          screens: +(el.getBoundingClientRect().height / window.innerHeight).toFixed(2),
+          overflow: document.documentElement.scrollWidth - document.documentElement.clientWidth,
+        };
+      });
+      console.log(`      proposal with every alternatives list closed (${name}): `
+        + `${beforeMetrics.screens} screens · overflow ${beforeMetrics.overflow}px`);
+      ok(`${name}: …and the page still does not scroll sideways`,
+        beforeMetrics.overflow === 0);
+
+      await page.click(swapToggle);
+      await page.waitForTimeout(150);
+      const altButtons = page.locator(`[data-testid^="v2-choose-${swapCat.category}-"]`);
+      ok(`${name}: the list holds exactly the engine's alternatives`,
+        await altButtons.count() === swapAlts.length);
+      ok(`${name}: …and the current recommendation is not among them`,
+        await page.locator(
+          `[data-testid="v2-choose-${swapCat.category}-${swapCat.partId}"]`).count() === 0);
+
+      const altAButton = page.locator(`[data-testid="v2-choose-${swapCat.category}-${altA}"]`);
+      const altAName = (await altAButton.getAttribute('aria-label') ?? '')
+        .replace(/^اختيار\s+/, '');
+      ok(`${name}: the alternative pressed is the LAST offered, not the first`,
+        swapAlts.length > 1 && altA !== altB);
+      const altBox = await altAButton.boundingBox();
+      ok(`${name}: the alternative button is a real touch target`,
+        !!altBox && altBox.height >= 44);
+
+      /* Keyboard, and a ring a sighted keyboard user can actually find. */
+      await altAButton.focus();
+      await page.keyboard.press('Shift+Tab');
+      await page.keyboard.press('Tab');
+      const altRing = await page.evaluate(() => {
+        const el = document.activeElement as HTMLElement | null;
+        if (!el) return null;
+        const cs = getComputedStyle(el);
+        return {
+          testId: el.getAttribute('data-testid') ?? '',
+          width: parseFloat(cs.outlineWidth) || 0,
+          style: cs.outlineStyle,
+        };
+      });
+      ok(`${name}: the keyboard reaches the alternative and it draws a ring`,
+        !!altRing && altRing.testId === `v2-choose-${swapCat.category}-${altA}`
+        && altRing.width >= 2 && altRing.style !== 'none');
+
+      /* Press it with the KEYBOARD, so the whole path is proven hands-free. */
+      await page.keyboard.press('Enter');
+      await page.waitForTimeout(300);
+
+      const afterA = engine({ selectedParts: { [swapCat.category]: altA } });
+      ok(`${name}: the engine now calls it the reader's own`,
+        await statusOfCat(swapCat.category) === 'user-selected'
+        && await sourceOfCat(swapCat.category) === 'user-selected');
+      ok(`${name}: …and it is the exact alternative pressed`,
+        await shownPart(swapCat.category) === partName(afterA, swapCat.category)
+        && await shownPart(swapCat.category) === altAName);
+      ok(`${name}: the card moved into «اخترتها»`,
+        await page.locator(
+          `[data-testid="v2-group-chosen"] [data-testid="v2-cat-${swapCat.category}"]`)
+          .count() === 1);
+      ok(`${name}: the swap control is gone — it is an ordinary choice now`,
+        await page.locator(swapToggle).count() === 0
+        && await page.locator(
+          `[data-testid="v2-change-choice-${swapCat.category}"]`).count() === 1);
+      ok(`${name}: the choice was announced`,
+        ((await page.locator('[data-testid="v2-selection-announcement"]').textContent()) ?? '')
+          === `تم اختيار ${altAName}`);
+      ok(`${name}: the keyboard landed on the card that changed`,
+        await page.evaluate(() => document.activeElement
+          ?.getAttribute('data-testid')) === `v2-cat-${swapCat.category}`);
+
+      /*
+       * EVERY OTHER CARD EQUALS THE RECOMPUTED BUILD — not the one before.
+       * Checked against the engine, category by category, whether or not this
+       * catalogue happened to move any of them.
+       */
+      let checked = 0;
+      let moved = 0;
+      for (const d of afterA.decisions) {
+        if (d.category === swapCat.category) continue;
+        const expected = partName(afterA, d.category);
+        if (!expected) continue;
+        checked++;
+        if (partName(base, d.category) !== expected) moved++;
+        ok(`${name}: «${d.category}» shows the recomputed answer`,
+          await shownPart(d.category) === expected);
+      }
+      console.log(`      recomputation (${name}): ${checked} other categories checked, `
+        + `${moved} genuinely moved`);
+      ok(`${name}: …and that comparison covered real categories`, checked >= 4);
+
+      if (name === '390px') {
+        await page.screenshot({ path: `${SHOTS}/17-recommendation-overridden-390.png`, fullPage: true });
+      }
+
+      // ── Back to the system's own answer, then a different alternative ─────
+      await page.click(`[data-testid="v2-change-choice-${swapCat.category}"]`);
+      await page.waitForTimeout(300);
+      ok(`${name}: clearing restores the SYSTEM recommendation`,
+        await statusOfCat(swapCat.category) === 'recommended'
+        && await sourceOfCat(swapCat.category) === 'system'
+        && await shownPart(swapCat.category) === partName(base, swapCat.category));
+      ok(`${name}: …and the swap control is back with it`,
+        await page.locator(swapToggle).count() === 1);
+      ok(`${name}: …and every other card is back to the engine's original answer`,
+        await shownPart(afterA.decisions.find(d =>
+          d.category !== swapCat.category && base.parts[d.category])!.category)
+          === partName(base, afterA.decisions.find(d =>
+            d.category !== swapCat.category && base.parts[d.category])!.category));
+
+      await page.click(swapToggle);
+      await page.waitForTimeout(150);
+      await page.click(`[data-testid="v2-choose-${swapCat.category}-${altB}"]`);
+      await page.waitForTimeout(300);
+      const afterB = engine({ selectedParts: { [swapCat.category]: altB } });
+      ok(`${name}: A → clear → B lands on B`,
+        await sourceOfCat(swapCat.category) === 'user-selected'
+        && await shownPart(swapCat.category) === partName(afterB, swapCat.category));
+      ok(`${name}: …and B is a different part from A`,
+        partName(afterB, swapCat.category) !== partName(afterA, swapCat.category));
+
+      // ── The swap survives leaving the proposal and coming back ────────────
+      await page.click('[data-testid="v2-back"]');
+      await page.waitForTimeout(200);
+      await page.click('[data-testid="v2-open-proposal"]');
+      await page.waitForTimeout(300);
+      ok(`${name}: the swap survives proposal → summary → proposal`,
+        await sourceOfCat(swapCat.category) === 'user-selected'
+        && await shownPart(swapCat.category) === partName(afterB, swapCat.category));
+
+      const afterMetrics = await page.evaluate(() => {
+        const el = document.querySelector('[data-testid="v2-proposal"]')!;
+        return {
+          screens: +(el.getBoundingClientRect().height / window.innerHeight).toFixed(2),
+          overflow: document.documentElement.scrollWidth - document.documentElement.clientWidth,
+        };
+      });
+      console.log(`      proposal after the swap (${name}): ${afterMetrics.screens} screens `
+        + `· overflow ${afterMetrics.overflow}px`);
+      ok(`${name}: still no horizontal overflow after the swap`, afterMetrics.overflow === 0);
 
       // ── H. THE PREVIEW'S OWN WAY OUT ──────────────────────────────────────
       /*
